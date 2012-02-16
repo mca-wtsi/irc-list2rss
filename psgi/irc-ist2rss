@@ -1,0 +1,31 @@
+#! //usr/bin/perl -T
+
+use strict;
+use warnings;
+
+use POE;
+
+
+sub main {
+  POE::Session->create(package_states => [ main => [ qw(_start irc_join) ] ]);
+
+  $poe_kernel->run();
+}
+
+sub _start {
+  my $irc = POE::Component::IRC::State->spawn
+    (Nick   => 'list2rss',
+     Server => 'localhost', # I have a tunnel to the local ircd
+     # you may not want to /list on a big network
+    );
+
+#     $irc->plugin_add('AutoJoin', POE::Component::IRC::Plugin::AutoJoin->new(
+#        Channels => [ '#test_channel1', '#test_channel2' ]
+#     ));
+
+  $irc->yield(register => 'join');
+  $irc->yield('connect');
+}
+
+
+main();
