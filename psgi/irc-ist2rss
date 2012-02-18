@@ -1,30 +1,219 @@
-#! //usr/bin/perl -T
+#! /usr/bin/perl
 
 use strict;
 use warnings;
 
-use POE;
+use POE qw( Component::IRC );
+use IRC::Utils qw( strip_formatting );
+use Time::HiRes qw( gettimeofday );
+
+
+$SIG{__WARN__} = sub {
+  my $t = [gettimeofday()];
+
+  my @now = localtime($$t[0]);
+  my $now = sprintf('%04d%02d%02d %02d%02d%02d.%06d',
+		    $now[5]+1900,$now[4]+1,@now[3,2,1,0], $$t[1]);
+  my $txt = "@_";
+  $txt =~ s{^}{$now: }mg;
+  warn $txt;
+};
+sub dbg { require YAML; warn YAML::Dump(\@_) }
+
+sub irc_raw     { warn "<= $_[10]" }
+sub irc_raw_out { warn "=> $_[10]" }
+
+
+my $t1; # (best guess at) chanserv's relative time
+my %done = (chanserv => 0, list => 0);
+my %chan; # key = '#channel', value = \%info
+# %info = (t => $unixtime_created, topic => $formatted ] # any may be undef
+# XXX: characterset tracking and IRC unformatting is left undone in a cavalier way
 
 
 sub main {
-  POE::Session->create(package_states => [ main => [ qw(_start irc_join) ] ]);
-
-  $poe_kernel->run();
+  do_irc();
+  dbg({ chan => \%chan, waiting_for => [ waiting_for() ] });
 }
 
-sub _start {
-  my $irc = POE::Component::IRC::State->spawn
-    (Nick   => 'list2rss',
-     Server => 'localhost', # I have a tunnel to the local ircd
+sub do_irc {
+  my $irc = POE::Component::IRC->spawn
+    (nick   => 'list2rss',
+     ircname => $0,
+     server => 'localhost', port => 16667, # I have a tunnel to the local ircd
      # you may not want to /list on a big network
-    );
+    ) or die "POE::Component::IRC spawn failed: $!";
 
-#     $irc->plugin_add('AutoJoin', POE::Component::IRC::Plugin::AutoJoin->new(
-#        Channels => [ '#test_channel1', '#test_channel2' ]
-#     ));
+  # $irc->raw_events(1);
 
-  $irc->yield(register => 'join');
-  $irc->yield('connect');
+  POE::Session->create
+      (package_states => [ main => [qw[ _start irc_connected irc_001 irc_321 irc_322 irc_323 irc_notice irc_msg irc_raw irc_raw_out ]] ],
+       heap => { irc => $irc });
+
+  $poe_kernel->sig(INT => "got_sig_int");
+
+  # global is exported from POE::Kernel by POE
+  $poe_kernel->run();
+  # returns after IRC shutdown
+}
+
+sub listener_got_sig_int {
+  warn "Received SIGINT\n";
+
+  hangup_irc($_[HEAP]->{irc});
+  $_[KERNEL]->sig_handled();
+  # based on http://poe.perl.org/?POE_Cookbook/Web_Server_With_Forking
+}
+
+
+=head1 IRC EVENTS
+
+=head2 _start
+
+Component initialised?
+
+=cut
+
+sub _start {
+  my $heap = $_[HEAP];
+
+  # retrieve our component's object from the heap where we stashed it
+  my $irc = $heap->{irc};
+
+  $irc->yield( register => 'all' );
+  $irc->yield( connect => { } );
+}
+
+
+=head2 irc_001
+
+We received the welcome message from ircd.
+
+=cut
+
+sub irc_connected {  } # too early to send commands
+sub irc_001 {
+  my $irc = $_[HEAP]->{irc};
+
+  # Connected & introduced.  Ask for what we want
+  $irc->yield('list');
+  $irc->yield(privmsg => 'ChanServ', 'list *');
+  $t1 = time();
+}
+
+
+sub irc_notice {
+  my ($from, undef, $msg) = @_[10..12];
+#  dbg({ notice => { from => $from, msg => $msg } });
+  msg($msg, $from, 1, $_[HEAP]->{irc});
+}
+
+sub irc_msg {
+  my ($from, undef, $msg) = @_[10..12];
+  msg($msg, $from, 0, $_[HEAP]->{irc});
+#  dbg({ msg => { from => $from, msg => $msg } });
+  hangup_irc($_[HEAP]->{irc}) if $msg =~ /bye/;
+}
+
+sub msg {
+  my ($msg, $from, $is_notice, $irc) = @_;
+  my $plain = strip_formatting($msg);
+  my $type = $is_notice ? 'notice' : 'privmsg';
+  if (my ($serv, $origin) = $from =~ m{^(chanserv|global)!\1\@(.*)}i) {
+    if ($serv =~ /^chanserv$/i) {
+      chanserv($plain, $irc);
+    }
+#    else { warn "Ignoring service '$serv'" }
+  } else {
+    warn "$type from $from (?) : $plain\n";
+  }
+}
+
+sub chanserv {
+  my ($txt, $irc) = @_;
+  if ($txt =~ /^-- Listing channels matching/) {
+    # our query; ignore
+  } elsif (my ($ch, $tstr) = $txt =~
+	   m{^(#\S+)\s+.*created (.*) ago}) {
+    # #foochan      << ACTIVE >> created 1 week 1 day (11h 22m 11s) ago
+    $tstr =~ s{[()]}{}g;
+    my $t = $t1; # the "now" from earlier
+    my %u = (s => 1, m => 60, h => 3600,
+	     day => 24*3600, week => 7*24*3600);
+    while ($tstr =~ s{^\s*(\d+\.?\d*)\s*([a-z]+)\s*}{}) {
+      my ($n, $unit) = ($1, $2);
+      my $mul = $u{$unit};
+      if (!defined $mul && $unit =~ s/(.)s$/$1/) {
+	$mul = $u{$unit};
+      }
+      if ($mul) {
+	$t -= $mul * $n;
+      } else {
+	warn "Unknown unit $n*'$unit' from chanserv ('$tstr' <= '$txt')";
+	undef $t;
+	last;
+      }
+    }
+    undef $t if $tstr ne '';
+    $chan{$ch}->{'regtime'} = $t;
+    # XXX: could also "privmsg chanserv info $ch", to get founder(+last seen) + last used
+    # no wildcard and not well delimited, would be slow
+  } elsif ($txt =~ /^-- End of list /) {
+    is_done(chanserv => $irc);
+  } else {
+    warn "Unrecognised chanserv txt '$txt'";
+  }
+}
+
+
+sub is_done {
+  my ($key, $irc) = @_;
+  warn "Done what $key?" unless exists $done{$key};
+  my @left = waiting_for();
+  $done{$key} ++;
+  if (@left && !waiting_for()) {
+    hangup_irc($irc);
+  }
+}
+
+sub waiting_for {
+  return grep { !$done{$_} } sort keys %done;
+}
+
+
+###  From RFC1459 sec 6.2:
+#
+#   321     RPL_LISTSTART
+#                   "Channel :Users  Name"
+#   322     RPL_LIST
+#                   "<channel> <# visible> :<topic>"
+#   323     RPL_LISTEND
+#                   ":End of /LIST"
+#
+#           - Replies RPL_LISTSTART, RPL_LIST, RPL_LISTEND mark
+#             the start, actual replies with data and end of the
+#             server's response to a LIST command.  If there are
+#             no channels available to return, only the start
+#             and end reply must be sent.
+sub irc_321 {
+  # warn "[321-";
+}
+sub irc_322 {
+  # warn "-322-";
+  my ($ch, $npeep, $topic) = @{ $_[12] };
+  # dbg(322 => [ @_[10..$#_] ]);
+  $chan{$ch}->{topic} = $topic;
+  $chan{$ch}->{npeep} = $npeep;
+}
+sub irc_323 {
+  # warn "-323]";
+  is_done(list => $_[HEAP]->{irc});
+}
+
+
+sub hangup_irc {
+  my ($irc) = @_;
+  $irc->yield(shutdown => "Must dash - HTTP client waiting", 5);
 }
 
 
