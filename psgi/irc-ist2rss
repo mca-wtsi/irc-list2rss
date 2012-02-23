@@ -6,13 +6,18 @@ use warnings;
 use Time::HiRes qw( gettimeofday tv_interval );
 BEGIN {
   my $t0 = [gettimeofday()];
-  my @t0 = localtime($$t0[0]);
+
+  sub iso8601 {
+    my ($t) = @_;
+    my @t = localtime($t);
+    return sprintf('%04d%02d%02dt%02d%02d%02d',
+		   $t[5]+1900,$t[4]+1,@t[3,2,1,0]);
+  }
+  my $t0_str = iso8601($$t0[0]);
 
   $SIG{__WARN__} = sub {
     my $t = tv_interval($t0);
-
-    my $now = sprintf('%04d%02d%02dt%02d%02d%02d +%9.6f',
-		      $t0[5]+1900,$t0[4]+1,@t0[3,2,1,0], $t);
+    my $now = sprintf('%s +%9.6f', $t0_str, $t);
     my $txt = "@_";
     $txt =~ s{^}{$now: }mg;
     warn $txt;
