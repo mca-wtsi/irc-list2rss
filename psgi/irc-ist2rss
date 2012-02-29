@@ -26,6 +26,8 @@ BEGIN {
 
 use IRC::Utils qw( strip_formatting );
 use POE qw( Component::IRC );
+use XML::RSS;
+use DateTime::Format::W3CDTF;
 
 sub dbg { require YAML; warn YAML::Dump(\@_) }
 
@@ -43,8 +45,16 @@ my %chan; # key = '#channel', value = \%info
 sub main {
   warn "main";
   do_irc();
-  warn "done irc";
-#  dbg({ chan => \%chan, waiting_for => [ waiting_for() ] });
+
+  if (waiting_for()) {
+    print "Status: 500\nContent-type: text/plain\n\n";
+    print "Incomplete data.  This is what I have\n";
+    require YAML;
+    print YAML::Dump({ chan => \%chan, waiting_for => [waiting_for()] });
+  } else {
+    print "Status: 200\nContent-type: text/xml\n\n";
+    print rssify(\%chan)->as_string;
+  }
 }
 
 sub do_irc {
@@ -225,6 +235,43 @@ sub irc_323 {
 sub hangup_irc {
   my ($irc) = @_;
   $irc->yield(shutdown => "Must dash - HTTP client waiting", 5);
+}
+
+
+
+sub rssify {
+  my ($chan) = @_;
+
+  my $rss = XML::RSS->new (version => '2.0');
+  $rss->channel(title          => 'irc list2rss',
+		link           => 'https://github.com/mca-wtsi/irc-list2rss',
+		description    => 'Channels on IRC server',
+               );
+
+  my $S = as_channel(\%chan);
+  foreach my $ch (sort $S keys %$chan) {
+    my $date = $chan->{$ch}{regtime};
+    if ($date) {
+      $date = DateTime->from_epoch(epoch => $chan->{$ch}{regtime});
+      $date = DateTime::Format::W3CDTF->new->format_datetime($date);
+    }
+
+    $rss->add_item
+      (title => $ch,
+       description => $chan->{$ch}{topic},
+       pubDate => $date);
+  }
+
+  return $rss;
+}
+
+sub as_channel { # curried sorter
+  my ($chan) = @_;
+  return sub {
+    (defined $chan->{$b}{regtime} <=> defined $chan->{$a}{regtime} ||
+     ($chan->{$b}{regtime} || 0)  <=> ($chan->{$a}{regtime} || 0)  ||
+     $a cmp $b );
+  }
 }
 
 
