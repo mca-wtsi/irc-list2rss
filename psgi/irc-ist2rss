@@ -57,6 +57,17 @@ sub main {
   }
 }
 
+
+sub do_irc_fake {
+  # quicker than pounding the server
+  %done = ();
+  %chan = ('#foo' => { topic => 'Foo those bars!' },
+	   '#bar' => { topic => 'Bar those doors!' },
+	   '#minimal' => {},
+	   '#reg' => { regtime => time() - 168*24*3600 },
+	  );
+}
+
 sub do_irc {
   my $irc = POE::Component::IRC->spawn
     (nick   => 'list2rss',
