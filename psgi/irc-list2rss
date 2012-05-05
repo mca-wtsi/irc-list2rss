@@ -87,9 +87,11 @@ sub do_irc {
 
   # $irc->raw_events(1);
 
-  POE::Session->create
-      (package_states => [ __PACKAGE__, [qw[ _start irc_connected irc_001 irc_321 irc_322 irc_323 irc_notice irc_msg irc_raw irc_raw_out ]] ],
+  my $sess = POE::Session->create
+      (package_states => [ __PACKAGE__, [qw[ _start irc_socketerr irc_connected irc_001 irc_321 irc_322 irc_323 irc_notice irc_msg irc_raw irc_raw_out ]] ],
        heap => { irc => $irc });
+
+#  $sess->option(trace => 1);
 
   $poe_kernel->sig(INT => "got_sig_int");
 
@@ -123,6 +125,21 @@ sub _start {
 
   $irc->yield( register => 'all' );
   $irc->yield( connect => { } );
+}
+
+sub irc_socketerr {
+  my $fail = $_[ARG0];
+  hangup_irc($_[HEAP]->{irc}, fail => $fail);
+}
+
+
+sub __poe_dump {
+  my %arg;
+  @arg{qw{ CALLER_FILE CALLER_LINE CALLER_STATE STATE }}
+    = @_[  CALLER_FILE,CALLER_LINE,CALLER_STATE,STATE ];
+  $arg{args} = @_[ ARG0 .. $#_ ];
+  require YAML;
+  warn YAML::Dump({ irc_socketerr => \%arg });
 }
 
 
