@@ -6,6 +6,7 @@ use warnings;
 use Time::HiRes qw( gettimeofday tv_interval );
 BEGIN {
   my $t0 = [gettimeofday()];
+  # Why?  I think I wanted to show compile-time or something
 
   sub iso8601 {
     my ($t) = @_;
@@ -29,21 +30,17 @@ use POE qw( Component::IRC );
 use XML::RSS;
 use DateTime::Format::W3CDTF;
 
-sub dbg { require YAML; warn YAML::Dump(\@_) }
 
-sub irc_raw     { warn "<= $_[10]" }
-sub irc_raw_out { warn "=> $_[10]" }
-
-
+# XXX: nasty globalitis rash here, will be painful on second request, put on HEAP or in OBJECT?
 my $t1; # (best guess at) chanserv's relative time
 my %done = (chanserv => 0, list => 0);
-my %chan; # key = '#channel', value = \%info
 my @hup; # info about hangup
+my %chan; # key = '#channel', value = \%info
 # %info = (t => $unixtime_created, topic => $formatted ] # any may be undef
 # XXX: characterset tracking and IRC unformatting is left undone in a cavalier way
 
 
-sub app {
+sub app { # as psgi
   my $env = shift;
 
   do_irc();
@@ -55,6 +52,7 @@ sub app {
 	     [ "Incomplete data.  This is what I have\n",
 	       YAML::Dump({ chan => \%chan,
 			    waiting_for => [waiting_for()],
+#			    env => $env,
 			    hangup => \@hup }),
 	     ]
 	   ];
@@ -86,10 +84,14 @@ sub do_irc {
     ) or die "POE::Component::IRC spawn failed: $!";
 
   # $irc->raw_events(1);
+  my @ev =
+    (qw( _start irc_socketerr irc_connected ),
+     qw( irc_001 irc_321 irc_322 irc_323 ),
+     qw( irc_notice irc_msg irc_raw irc_raw_out ));
 
   my $sess = POE::Session->create
-      (package_states => [ __PACKAGE__, [qw[ _start irc_socketerr irc_connected irc_001 irc_321 irc_322 irc_323 irc_notice irc_msg irc_raw irc_raw_out ]] ],
-       heap => { irc => $irc });
+    (package_states => [ __PACKAGE__, \@ev ],
+     heap => { irc => $irc });
 
 #  $sess->option(trace => 1);
 
@@ -100,6 +102,14 @@ sub do_irc {
   # returns after IRC shutdown
 }
 
+
+=head1 POE EVENTS
+
+=cut
+
+sub irc_raw     { warn "<= $_[10]" }
+sub irc_raw_out { warn "=> $_[10]" }
+
 sub listener_got_sig_int {
   warn "Received SIGINT\n";
 
@@ -109,8 +119,6 @@ sub listener_got_sig_int {
 }
 
 
-=head1 IRC EVENTS
-
 =head2 _start
 
 Component initialised?
@@ -118,10 +126,8 @@ Component initialised?
 =cut
 
 sub _start {
-  my $heap = $_[HEAP];
-
   # retrieve our component's object from the heap where we stashed it
-  my $irc = $heap->{irc};
+  my $irc = $_[HEAP]->{irc};
 
   $irc->yield( register => 'all' );
   $irc->yield( connect => { } );
@@ -129,17 +135,7 @@ sub _start {
 
 sub irc_socketerr {
   my $fail = $_[ARG0];
-  hangup_irc($_[HEAP]->{irc}, fail => $fail);
-}
-
-
-sub __poe_dump {
-  my %arg;
-  @arg{qw{ CALLER_FILE CALLER_LINE CALLER_STATE STATE }}
-    = @_[  CALLER_FILE,CALLER_LINE,CALLER_STATE,STATE ];
-  $arg{args} = @_[ ARG0 .. $#_ ];
-  require YAML;
-  warn YAML::Dump({ irc_socketerr => \%arg });
+  hangup_irc($_[HEAP]->{irc}, socketerr => $fail);
 }
 
 
@@ -161,16 +157,68 @@ sub irc_001 {
 
 
 sub irc_notice {
-  my ($from, undef, $msg) = @_[10..12];
+  my ($from, undef, $msg) = @_[ARG0 .. $#_];
 #  dbg({ notice => { from => $from, msg => $msg } });
   msg($msg, $from, 1, $_[HEAP]->{irc});
 }
 
 sub irc_msg {
-  my ($from, undef, $msg) = @_[10..12];
-  msg($msg, $from, 0, $_[HEAP]->{irc});
+  my ($from, undef, $msg) = @_[ARG0 .. $#_];
 #  dbg({ msg => { from => $from, msg => $msg } });
+  msg($msg, $from, 0, $_[HEAP]->{irc});
   hangup_irc($_[HEAP]->{irc}, 'bye') if $msg =~ /bye/;
+}
+
+
+###  From RFC1459 sec 6.2:
+#
+#   321     RPL_LISTSTART
+#                   "Channel :Users  Name"
+#   322     RPL_LIST
+#                   "<channel> <# visible> :<topic>"
+#   323     RPL_LISTEND
+#                   ":End of /LIST"
+#
+#           - Replies RPL_LISTSTART, RPL_LIST, RPL_LISTEND mark
+#             the start, actual replies with data and end of the
+#             server's response to a LIST command.  If there are
+#             no channels available to return, only the start
+#             and end reply must be sent.
+sub irc_321 {
+  # warn "[321-";
+}
+sub irc_322 {
+  # warn "-322-";
+  my ($ch, $npeep, $topic) = @{ $_[ARG2] };
+  # dbg(322 => [ @_[ARG0..$#_] ]);
+  $chan{$ch}->{topic} = $topic;
+  $chan{$ch}->{npeep} = $npeep;
+}
+sub irc_323 {
+  # warn "-323]";
+  is_done(list => $_[HEAP]->{irc});
+}
+
+
+=head1 APP CODE
+
+=head2 Higher level dealings with IRC
+
+=cut
+
+sub dbg { require YAML; warn YAML::Dump(\@_) }
+
+sub __poe_dump {
+  my %arg;
+  @arg{qw{ CALLER_FILE CALLER_LINE CALLER_STATE STATE }}
+    = @_[  CALLER_FILE,CALLER_LINE,CALLER_STATE,STATE ];
+  $arg{args} = @_[ ARG0 .. $#_ ];
+  $arg{offs} =
+    { ARG0 => ARG0, KERNEL => KERNEL, OBJECT => OBJECT, HEAP => HEAP,
+      CALLER_FILE => CALLER_FILE, CALLER_LINE => CALLER_LINE, CALLER_STATE => CALLER_STATE,
+      SENDER => SENDER, STATE => STATE, SESSION => SESSION };
+
+  return dbg(\%arg);
 }
 
 sub msg {
@@ -239,36 +287,6 @@ sub waiting_for {
 }
 
 
-###  From RFC1459 sec 6.2:
-#
-#   321     RPL_LISTSTART
-#                   "Channel :Users  Name"
-#   322     RPL_LIST
-#                   "<channel> <# visible> :<topic>"
-#   323     RPL_LISTEND
-#                   ":End of /LIST"
-#
-#           - Replies RPL_LISTSTART, RPL_LIST, RPL_LISTEND mark
-#             the start, actual replies with data and end of the
-#             server's response to a LIST command.  If there are
-#             no channels available to return, only the start
-#             and end reply must be sent.
-sub irc_321 {
-  # warn "[321-";
-}
-sub irc_322 {
-  # warn "-322-";
-  my ($ch, $npeep, $topic) = @{ $_[12] };
-  # dbg(322 => [ @_[10..$#_] ]);
-  $chan{$ch}->{topic} = $topic;
-  $chan{$ch}->{npeep} = $npeep;
-}
-sub irc_323 {
-  # warn "-323]";
-  is_done(list => $_[HEAP]->{irc});
-}
-
-
 sub hangup_irc {
   my ($irc, @hup_info) = @_;
   push @hup, \@hup_info;
@@ -276,6 +294,11 @@ sub hangup_irc {
 }
 
 
+=head2 HTTP output side
+
+It might be called "the view".
+
+=cut
 
 sub rssify {
   my ($chan) = @_;
