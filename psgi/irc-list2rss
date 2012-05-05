@@ -38,6 +38,7 @@ sub irc_raw_out { warn "=> $_[10]" }
 my $t1; # (best guess at) chanserv's relative time
 my %done = (chanserv => 0, list => 0);
 my %chan; # key = '#channel', value = \%info
+my @hup; # info about hangup
 # %info = (t => $unixtime_created, topic => $formatted ] # any may be undef
 # XXX: characterset tracking and IRC unformatting is left undone in a cavalier way
 
@@ -51,8 +52,11 @@ sub app {
     require YAML;
     return [ '500',
 	     [ 'Content-Type' => 'text/plain' ],
-	     "Incomplete data.  This is what I have\n",
-	     YAML::Dump({ chan => \%chan, waiting_for => [waiting_for()] }),
+	     [ "Incomplete data.  This is what I have\n",
+	       YAML::Dump({ chan => \%chan,
+			    waiting_for => [waiting_for()],
+			    hangup => \@hup }),
+	     ]
 	   ];
   } else {
     return [ '200',
@@ -97,7 +101,7 @@ sub do_irc {
 sub listener_got_sig_int {
   warn "Received SIGINT\n";
 
-  hangup_irc($_[HEAP]->{irc});
+  hangup_irc($_[HEAP]->{irc}, 'sigint');
   $_[KERNEL]->sig_handled();
   # based on http://poe.perl.org/?POE_Cookbook/Web_Server_With_Forking
 }
@@ -149,7 +153,7 @@ sub irc_msg {
   my ($from, undef, $msg) = @_[10..12];
   msg($msg, $from, 0, $_[HEAP]->{irc});
 #  dbg({ msg => { from => $from, msg => $msg } });
-  hangup_irc($_[HEAP]->{irc}) if $msg =~ /bye/;
+  hangup_irc($_[HEAP]->{irc}, 'bye') if $msg =~ /bye/;
 }
 
 sub msg {
@@ -209,7 +213,7 @@ sub is_done {
   my @left = waiting_for();
   $done{$key} ++;
   if (@left && !waiting_for()) {
-    hangup_irc($irc);
+    hangup_irc($irc, 'all done');
   }
 }
 
@@ -249,7 +253,8 @@ sub irc_323 {
 
 
 sub hangup_irc {
-  my ($irc) = @_;
+  my ($irc, @hup_info) = @_;
+  push @hup, \@hup_info;
   $irc->yield(shutdown => "Must dash - HTTP client waiting", 5);
 }
 
