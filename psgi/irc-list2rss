@@ -245,7 +245,7 @@ sub chanserv {
     # #foochan      << ACTIVE >> created 1 week 1 day (11h 22m 11s) ago
     $tstr =~ s{[()]}{}g;
     my $t = $t1; # the "now" from earlier
-    my %u = (s => 1, m => 60, h => 3600,
+    my %u = (s => 1, m => 60, h => 3600, year => 365.25*24*3600,
 	     day => 24*3600, week => 7*24*3600);
     while ($tstr =~ s{^\s*(\d+\.?\d*)\s*([a-z]+)\s*}{}) {
       my ($n, $unit) = ($1, $2);
